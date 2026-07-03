@@ -76,7 +76,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./src/streaming/Dockerfile
+          file: ./streaming/Dockerfile
           push: true
           tags: ${{ steps.meta-streaming.outputs.tags }}
           labels: ${{ steps.meta-streaming.outputs.labels }}
