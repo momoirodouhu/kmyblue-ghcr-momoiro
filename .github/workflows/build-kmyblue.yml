@@ -33,7 +33,7 @@ jobs:
                   tag: .,
                   ver: (capture("kb(?<maj>[0-9]+)\\.(?<min>[0-9]+)(?:\\.(?<pat>[0-9]+))?") // {maj:"0", min:"0", pat:"0"})
                 })
-              | sort_by([(.ver.maj | tonumber), (.ver.min | tonumber), (.ver.pat | tonumber)])
+              | sort_by([((.ver.maj // "0") | tonumber), ((.ver.min // "0") | tonumber), ((.ver.pat // "0") | tonumber)])
               | last.tag')
           echo "Detected latest upstream tag: ${LATEST_TAG}"
           if [ "${{ inputs.tag_name }}" = "${LATEST_TAG}" ]; then
