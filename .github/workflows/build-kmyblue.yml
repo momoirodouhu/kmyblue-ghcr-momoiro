@@ -14,12 +14,10 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  check-latest:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    outputs:
+      is_latest: ${{ steps.check-latest.outputs.is_latest }}
     steps:
       - name: Check if target tag is the latest version
         id: check-latest
@@ -42,11 +40,92 @@ jobs:
             echo "is_latest=false" >> "$GITHUB_OUTPUT"
           fi
 
+  build:
+    needs: check-latest
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
       - name: Checkout upstream repository at target tag
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ inputs.tag_name }}
+
+      # GHCR へのログイン
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker Buildx のセットアップ
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # メインアプリケーションイメージのネイティブビルド＆ダイジェストプッシュ
+      - name: Build and push main Docker image by digest (${{ matrix.arch }})
+        id: build-main
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=main-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=main-${{ matrix.arch }}
+
+      # ストリーミングイメージのネイティブビルド＆ダイジェストプッシュ
+      - name: Build and push streaming Docker image by digest (${{ matrix.arch }})
+        id: build-streaming
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./streaming/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-streaming,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=streaming-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=streaming-${{ matrix.arch }}
+
+      - name: Save image digests
+        run: |
+          mkdir -p /tmp/digests
+          echo -n "${{ steps.build-main.outputs.digest }}" > "/tmp/digests/main-${{ matrix.arch }}"
+          echo -n "${{ steps.build-streaming.outputs.digest }}" > "/tmp/digests/streaming-${{ matrix.arch }}"
+
+      - name: Upload image digests
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [check-latest, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: /tmp/digests
 
       - name: Extract main Docker metadata
         id: meta-main
@@ -57,7 +136,7 @@ jobs:
             latest=false
           tags: |
             type=raw,value=${{ inputs.tag_name }}
-            type=raw,value=latest,enable=${{ steps.check-latest.outputs.is_latest }}
+            type=raw,value=latest,enable=${{ needs.check-latest.outputs.is_latest }}
             type=match,pattern=kb(\d+\.\d+),group=1,value=${{ inputs.tag_name }},prefix=kb
 
       - name: Extract streaming Docker metadata
@@ -69,10 +148,9 @@ jobs:
             latest=false
           tags: |
             type=raw,value=${{ inputs.tag_name }}
-            type=raw,value=latest,enable=${{ steps.check-latest.outputs.is_latest }}
+            type=raw,value=latest,enable=${{ needs.check-latest.outputs.is_latest }}
             type=match,pattern=kb(\d+\.\d+),group=1,value=${{ inputs.tag_name }},prefix=kb
 
-      # 3. GHCR へのログイン
       - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
@@ -80,31 +158,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. Docker Buildx (マルチアーキテクチャビルド) のセットアップ
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 5. メインアプリケーションイメージのビルド＆プッシュ
-      - name: Build and push main Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta-main.outputs.tags }}
-          labels: ${{ steps.meta-main.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and push main multi-arch manifest
+        run: |
+          TAGS_ARGS=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && TAGS_ARGS+=(-t "$tag")
+          done <<< "${{ steps.meta-main.outputs.tags }}"
+          docker buildx imagetools create "${TAGS_ARGS[@]}" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@$(cat /tmp/digests/main-amd64)" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@$(cat /tmp/digests/main-arm64)"
 
-      # 6. ストリーミングイメージのビルド＆プッシュ
-      - name: Build and push streaming Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./streaming/Dockerfile
-          push: true
-          tags: ${{ steps.meta-streaming.outputs.tags }}
-          labels: ${{ steps.meta-streaming.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and push streaming multi-arch manifest
+        run: |
+          TAGS_ARGS=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && TAGS_ARGS+=(-t "$tag")
+          done <<< "${{ steps.meta-streaming.outputs.tags }}"
+          docker buildx imagetools create "${TAGS_ARGS[@]}" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-streaming@$(cat /tmp/digests/streaming-amd64)" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-streaming@$(cat /tmp/digests/streaming-arm64)"
