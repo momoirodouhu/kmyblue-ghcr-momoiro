@@ -53,6 +53,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=${{ inputs.tag_name }}
             type=raw,value=latest,enable=${{ steps.check-latest.outputs.is_latest }}
@@ -63,6 +65,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-streaming
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=${{ inputs.tag_name }}
             type=raw,value=latest,enable=${{ steps.check-latest.outputs.is_latest }}
